@@ -6,6 +6,36 @@
 
 ---
 
+## Quickstart
+
+**1. Try the live demo (nothing to install).** Open **https://treasury.liam.cool**, upload a label from [`samples/labels/`](./samples/labels) — each is mapped to its expected verdict and the values to enter in that folder's [README](./samples/labels/README.md) — optionally type the application values, and click **Verify**. The result shows the label with a colour-coded box per field.
+
+**2. Run locally — no GPU, no model** (deterministic mock backend; good for code review + tests):
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app:app                 # UI: http://localhost:8000   ·   API docs: /docs
+pytest -q                       # 49 tests
+```
+
+**3. Run the full self-hosted stack** (Docker; Gemma 4 on **CPU** via Ollama + Redis + worker — no GPU needed):
+```bash
+cp .env.example .env
+docker compose up --build       # http://localhost:8000  (first boot pulls the model; allow Docker ≥12 GB RAM)
+```
+For the **GPU** production target (vLLM) or the exact runbook behind the live demo, see **§11**.
+
+**Quick API check:**
+```bash
+curl -F "image=@samples/labels/L000_gin_abv_mismatch.png" \
+     -F 'application={"brand_name":"Wandering Provisions","abv":"44","net_contents":"1 L"}' \
+     http://localhost:8000/verify
+```
+
+> Backends are config-driven (`.env`): `INFERENCE_BACKEND=mock|ollama|vllm`, `OCR_BACKEND=mock|tesseract`. Local defaults to `mock`; Compose uses `ollama` + `tesseract`.
+
+---
+
 ## 1. The problem
 
 TTB reviews ~150,000 label applications a year with ~47 agents. A large share of that work is mechanical matching: does the brand name on the artwork match the application, is the ABV right, is the mandatory government health warning present and correctly formatted. This tool automates the mechanical pass so agents spend their judgment where judgment is needed.
