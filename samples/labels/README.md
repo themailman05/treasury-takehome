@@ -14,7 +14,8 @@ colour-coded box per region, so the result is auditable at a glance.
 | `L000_gin_abv_mismatch.png` | ABV mismatch (label says 43%, app says 44) | Brand `Wandering Provisions` · Class `London Dry Gin` · ABV `44` · Net `1 L` | **fail** (ABV) |
 | `L002_rum_warning_missing_clause.png` | Government warning missing clause (2) | Brand `Black Fox Barrel Co.` · Class `Aged Caribbean Rum` · ABV `41` · Net `355 mL` | **fail** (warning) |
 | `L024_tequila_warning_title_case.png` | "Government Warning" not in all-caps (Jenny's reject) | Brand `Copper House` · Class `Tequila Reposado` · ABV `38` · Net `375 mL` | **fail** (warning caps) |
-| `L013_scotch_brand_variant.png` | Brand casing variant — `Iron Crest Cellars` vs `IRON CREST CELLARS` (Dave's case) | Brand `Iron Crest Cellars` · Class `Single Malt Scotch Whisky` · ABV `44` · Net `375 mL` | **needs_review** |
+| `L013_scotch_brand_variant.png` | Brand casing variant — app `Iron Crest Cellars` vs label `IRON CREST CELLARS` (Dave's "STONE'S THROW" case) | Brand `Iron Crest Cellars` · Class `Single Malt Scotch Whisky` · ABV `44` · Net `375 mL` | **pass** — case-insensitive match, not a false reject |
+| `L042_lager_warning_absent.png` | Government warning **absent** from the label | Brand `Wild Oak Spirits` · Class `Pilsner Lager` · ABV `5` · Net `500 mL` | **needs_review** — an unreadable/absent warning routes to a human, never auto-passes |
 
 These are from the pixel-exact "hybrid" test set (background art generated with an
 image model, then field + warning text composited with Pillow so the ground truth
