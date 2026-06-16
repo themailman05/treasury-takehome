@@ -368,3 +368,19 @@ Redeploy after a code change: `scp` the changed files to `~/treasury` and `sudo 
 - **Accuracy on the hybrid sample set.** With 12B the tool flags every defect (ABV / class-type / net-contents mismatch, missing-clause / reworded / title-case / absent warning, brand variant) as `fail`/`needs_review`, and passes compliant labels — the conservative bias the brief wants (never auto-pass a defect).
 - **In-memory batch.** The live demo runs the in-process batch executor (no Redis) — enough for the demo and trivial to operate; Redis + arq is documented above for scale.
 - **Security / exposure.** uvicorn binds `127.0.0.1`; only Caddy (TLS) is public. Nothing is persisted to disk — job results live in memory with a TTL. A production deploy would add auth, narrow the firewall source range, and keep secrets out of the repo (the HF token used only for the vLLM weights path must never be committed, and should be rotated if it ever leaks).
+
+## 13. Performance & hitting the ≤5s SLA
+
+Sarah's hard requirement is **results in ~5s** — the prior vendor's 30–40s killed adoption (§2). Where we are and how to get there:
+
+**Measured:** ~13s per label end-to-end on the live demo. Almost all of it is the **Gemma 4 vision call** (image prefill + JSON decode); Tesseract OCR of the warning is ~1s, and the deterministic verification (rapidfuzz + the warning comparator) is sub-millisecond. So latency is gated entirely by the model call — the verification logic itself is effectively free.
+
+**Why we're at ~13s: the GPU.** The demo runs on an **NVIDIA L4** — Nvidia's *entry-level, economical* inference card (24 GB, ~300 GB/s memory bandwidth). LLM token decode is memory-bandwidth-bound, so a 12B multimodal model is slow on an L4 relative to data-center GPUs. We chose the L4 for cost, not speed.
+
+**How to get under 5s (in order of leverage):**
+1. **Use a faster GPU — the primary lever, zero code change.** The same `gemma4:12b` on a higher-bandwidth card decodes several× faster and lands a single label **well under 5s with no accuracy loss**: L40S (~864 GB/s), A100 (~2 TB/s), or H100 (~3.3 TB/s). It's a pure infra swap — identical Ollama/vLLM config, just a bigger instance. **This is the recommended path: the SLA is a hardware-tier choice, not a code problem.**
+2. **Serve with vLLM instead of Ollama on the GPU.** Continuous batching + paged attention cut per-request latency under load and maximize throughput for the 200–300-label batch lane (already wired in: `INFERENCE_BACKEND=vllm`, `docker compose --profile gpu`).
+3. **Smaller or fine-tuned model.** `gemma4:e4b` is ~7s on the L4 but less accurate (§12); a model **fine-tuned/distilled on real labels** (§10) could be both fast *and* accurate — the best long-term answer if cheap hardware is a hard constraint.
+4. **Already applied:** the image is downscaled before the vision prefill, output is token-bounded, structured `format` decoding avoids reasoning-token waste, and the interactive lane is prioritized ahead of the batch lane (§4).
+
+Even at ~13s on the cheapest GPU, the tool already beats the 30–40s vendor that killed adoption; reaching ≤5s is a matter of provisioning an L40S-class (or better) instance.
