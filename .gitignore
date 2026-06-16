@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# Secrets / environment (never commit) — keep .env.example
+.env
+*.env
+!.env.example
+
+# Generated test-label images are large (~300 MB) and reproducible via
+# test_images/generate_labels*.py. Keep the generators + manifests, ignore the bitmaps.
+test_images/samples_hybrid/images/
+test_images/samples_hybrid/backgrounds/
+
+# SSH / private keys (never commit) — liam_rsa is a deploy key kept in this dir
+liam_rsa
+id_rsa
+*_rsa
+*.pem
+*.key
+
+# OS cruft
+.DS_Store

@@ -1,0 +1,14 @@
+{
+  "old_tom_bourbon.png": {
+    "brand_name": "OLD TOM DISTILLERY",
+    "class_type": "Kentucky Straight Bourbon Whiskey",
+    "abv": "45",
+    "net_contents": "750 mL"
+  },
+  "blue_heron_bourbon.png": {
+    "brand_name": "Blue Heron Trading Co.",
+    "class_type": "Kentucky Straight Bourbon Whiskey",
+    "abv": "48",
+    "net_contents": "500 mL"
+  }
+}

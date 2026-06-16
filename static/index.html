@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TTB Label Verification</title>
+<style>
+  /* ----------------------------------------------------------------------- *
+   * High-contrast, large-control UI for non-technical TTB agents (README §2).
+   * No build step, no external resources: everything is inline.
+   * ----------------------------------------------------------------------- */
+  :root {
+    --pass:   #1b7a2f;   --pass-bg:   #e6f4ea;
+    --fail:   #b3261e;   --fail-bg:   #fce8e6;
+    --review: #8a5a00;   --review-bg: #fff4d6;
+    --ink:    #14181f;   --muted:     #5a6472;
+    --line:   #cfd6e0;   --panel:     #ffffff;
+    --bg:     #f1f4f9;   --accent:    #0b4f8a;
+    --accent-d:#08365e;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font: 18px/1.5 system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ink); background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+  }
+  header.site {
+    background: var(--accent-d); color: #fff;
+    padding: 20px 24px;
+  }
+  header.site h1 { margin: 0; font-size: 26px; letter-spacing: .2px; }
+  header.site p  { margin: 6px 0 0; color: #cfe0f2; font-size: 16px; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 80px; }
+
+  /* Mode tabs */
+  .tabs { display: flex; gap: 10px; margin: 24px 0; }
+  .tab {
+    flex: 1; padding: 18px; font-size: 20px; font-weight: 700;
+    border: 3px solid var(--line); border-radius: 12px; background: #fff;
+    color: var(--accent-d); cursor: pointer;
+  }
+  .tab[aria-selected="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .tab:focus-visible { outline: 4px solid #ffd54a; outline-offset: 2px; }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; padding: 24px; margin-bottom: 24px;
+    box-shadow: 0 1px 3px rgba(20,24,31,.06);
+  }
+  .panel h2 { margin: 0 0 4px; font-size: 22px; }
+  .panel .hint { color: var(--muted); margin: 0 0 20px; font-size: 16px; }
+
+  /* Form */
+  label.field { display: block; margin-bottom: 16px; font-weight: 600; }
+  label.field span.lbl { display: block; margin-bottom: 6px; font-size: 16px; }
+  input[type="text"] {
+    width: 100%; padding: 14px; font-size: 18px;
+    border: 2px solid var(--line); border-radius: 10px; background: #fff;
+  }
+  input[type="text"]:focus, input[type="file"]:focus { outline: 4px solid #ffd54a; outline-offset: 1px; }
+  .file-row {
+    border: 3px dashed var(--accent); border-radius: 12px; padding: 22px;
+    text-align: center; background: #f5f9ff; margin-bottom: 20px;
+  }
+  .file-row input[type="file"] { font-size: 17px; }
+  .file-row .picked { margin-top: 10px; color: var(--accent-d); font-weight: 700; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+  @media (max-width: 620px){ .grid2 { grid-template-columns: 1fr; } }
+
+  button.primary {
+    width: 100%; padding: 18px; font-size: 21px; font-weight: 800;
+    color: #fff; background: var(--accent); border: none; border-radius: 12px;
+    cursor: pointer; margin-top: 6px;
+  }
+  button.primary:hover { background: var(--accent-d); }
+  button.primary:disabled { background: #9aa7b6; cursor: progress; }
+  button.primary:focus-visible { outline: 4px solid #ffd54a; outline-offset: 2px; }
+
+  /* Status banners */
+  .status { padding: 16px 18px; border-radius: 12px; font-weight: 700; margin: 0 0 18px; }
+  .status.loading { background: #e8eef7; color: var(--accent-d); }
+  .status.error   { background: var(--fail-bg); color: var(--fail); border: 2px solid #f4b9b4; }
+  .empty { color: var(--muted); text-align: center; padding: 40px 10px; font-size: 17px; }
+  .spinner {
+    display: inline-block; width: 18px; height: 18px; vertical-align: -3px; margin-right: 8px;
+    border: 3px solid #b9c6da; border-top-color: var(--accent); border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Verdict badges */
+  .badge {
+    display: inline-block; padding: 4px 12px; border-radius: 999px;
+    font-weight: 800; font-size: 14px; letter-spacing: .4px; text-transform: uppercase;
+  }
+  .badge.pass         { background: var(--pass-bg);   color: var(--pass); }
+  .badge.fail         { background: var(--fail-bg);   color: var(--fail); }
+  .badge.needs_review { background: var(--review-bg); color: var(--review); }
+  .badge.big { font-size: 18px; padding: 8px 18px; }
+
+  /* Overall result header */
+  .overall {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 14px; padding: 18px 20px; border-radius: 12px; margin-bottom: 18px;
+    border: 2px solid transparent;
+  }
+  .overall.pass         { background: var(--pass-bg);   border-color: #a7d7b4; }
+  .overall.fail         { background: var(--fail-bg);   border-color: #f4b9b4; }
+  .overall.needs_review { background: var(--review-bg); border-color: #f0d79a; }
+  .overall .lead { font-size: 20px; font-weight: 800; }
+  .overall .sub  { font-size: 15px; color: var(--muted); font-weight: 600; }
+
+  /* Checklist */
+  .checklist { list-style: none; margin: 0 0 18px; padding: 0; }
+  .checklist li {
+    display: flex; align-items: flex-start; gap: 14px;
+    padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px;
+    margin-bottom: 10px; background: #fff;
+  }
+  .checklist li.pass         { border-left: 8px solid var(--pass); }
+  .checklist li.fail         { border-left: 8px solid var(--fail); }
+  .checklist li.needs_review { border-left: 8px solid var(--review); }
+  .mark { font-size: 26px; line-height: 1; width: 30px; flex: none; text-align: center; }
+  .mark.pass { color: var(--pass); }
+  .mark.fail { color: var(--fail); }
+  .mark.needs_review { color: var(--review); }
+  .ck-body { flex: 1; min-width: 0; }
+  .ck-name { font-weight: 800; font-size: 17px; text-transform: capitalize; }
+  .ck-meta { color: var(--muted); font-size: 15px; margin-top: 3px; word-break: break-word; }
+  .ck-meta b { color: var(--ink); font-weight: 700; }
+  .ck-meta .vs { color: var(--muted); }
+  .ck-note { margin-top: 4px; font-size: 14px; font-weight: 700; color: var(--review); }
+
+  /* Warning detail */
+  .components { margin: 8px 0 0; padding: 0; list-style: none; }
+  .components li {
+    display: flex; gap: 8px; align-items: center; padding: 5px 0;
+    border: none; margin: 0; font-size: 15px;
+  }
+  .components .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+  .components .dot.ok  { background: var(--pass); }
+  .components .dot.bad { background: var(--fail); }
+  .components .cname { font-weight: 700; text-transform: capitalize; }
+  .components .cmeta { color: var(--muted); }
+
+  /* Visual audit overlay: label image + colour-coded boxes per region */
+  .audit-wrap { position: relative; display: inline-block; max-width: 100%; margin: 6px 0 10px; }
+  .audit-img  { display: block; max-width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--line); }
+  .audit-box  { position: absolute; box-sizing: border-box; border: 3px solid var(--muted); border-radius: 4px; pointer-events: none; }
+  .audit-box.pass         { border-color: var(--pass); }
+  .audit-box.fail         { border-color: var(--fail); }
+  .audit-box.needs_review { border-color: var(--review); }
+  .audit-box.info         { border-color: var(--muted); border-style: dashed; }
+  .audit-tag  { position: absolute; top: -19px; left: -3px; font-size: 11px; font-weight: 800;
+                color: #fff; background: var(--muted); padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
+  .audit-tag.pass         { background: var(--pass); }
+  .audit-tag.fail         { background: var(--fail); }
+  .audit-tag.needs_review { background: var(--review); }
+  .audit-tag.info         { background: var(--muted); }
+
+  /* Flags */
+  .flags { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
+  .flag {
+    background: #eef1f6; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 8px; padding: 5px 10px; font-size: 14px; font-weight: 700;
+  }
+  .section-title { font-size: 16px; font-weight: 800; margin: 18px 0 8px; color: var(--accent-d); }
+
+  /* Batch progress */
+  .progress-wrap { margin: 6px 0 18px; }
+  .progress-meta { display: flex; justify-content: space-between; font-weight: 700; margin-bottom: 6px; }
+  .progress-bar {
+    height: 22px; background: #dfe6ef; border-radius: 999px; overflow: hidden; border: 1px solid var(--line);
+  }
+  .progress-fill {
+    height: 100%; width: 0; background: var(--accent); transition: width .4s ease;
+    background-image: linear-gradient(90deg, var(--accent), #1769b5);
+  }
+  .progress-fill.complete { background: var(--pass); background-image: none; }
+
+  .item {
+    border: 1px solid var(--line); border-radius: 12px; margin-bottom: 12px; background: #fff; overflow: hidden;
+  }
+  .item-head {
+    display: flex; align-items: center; gap: 12px; padding: 14px 16px; cursor: pointer; user-select: none;
+  }
+  .item-head:hover { background: #f7f9fc; }
+  .item-head .idx { color: var(--muted); font-weight: 700; flex: none; }
+  .item-head .fname { font-weight: 800; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item-head .chev { color: var(--muted); transition: transform .2s; }
+  .item.open .item-head .chev { transform: rotate(90deg); }
+  .item-body { padding: 0 16px 16px; border-top: 1px solid var(--line); }
+  .item-body[hidden] { display: none; }
+  .pill {
+    display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 13px; font-weight: 800;
+    text-transform: uppercase; letter-spacing: .3px;
+  }
+  .pill.pending    { background: #eef1f6; color: var(--muted); }
+  .pill.processing { background: #e8eef7; color: var(--accent-d); }
+  .pill.done       { background: var(--pass-bg); color: var(--pass); }
+  .pill.duplicate  { background: #ece4f7; color: #5b3a9a; }
+  .pill.error      { background: var(--fail-bg); color: var(--fail); }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<header class="site">
+  <h1>TTB Label Verification</h1>
+  <p>Check a beverage label against its application. Pass / Fail / Needs review &mdash; per field.</p>
+</header>
+
+<main>
+  <div class="tabs" role="tablist" aria-label="Verification mode">
+    <button class="tab" id="tab-single" role="tab" aria-controls="view-single" aria-selected="true">Single label</button>
+    <button class="tab" id="tab-batch"  role="tab" aria-controls="view-batch"  aria-selected="false">Batch upload</button>
+  </div>
+
+  <!-- ================= SINGLE ================= -->
+  <section id="view-single" role="tabpanel" aria-labelledby="tab-single">
+    <form class="panel" id="single-form" novalidate>
+      <h2>Verify one label</h2>
+      <p class="hint">Upload the label artwork, then enter the values from the application. Leave a field blank to skip it.</p>
+
+      <div class="file-row">
+        <label for="single-image"><strong>1. Choose the label image</strong></label><br/>
+        <input type="file" id="single-image" accept="image/*" required />
+        <div class="picked" id="single-image-name" aria-live="polite"></div>
+      </div>
+
+      <p><strong>2. Application values</strong></p>
+      <div class="grid2">
+        <label class="field"><span class="lbl">Brand name</span>
+          <input type="text" id="f-brand" placeholder="e.g. OLD TOM DISTILLERY" autocomplete="off" /></label>
+        <label class="field"><span class="lbl">Class / type</span>
+          <input type="text" id="f-class" placeholder="e.g. Kentucky Straight Bourbon" autocomplete="off" /></label>
+        <label class="field"><span class="lbl">Alcohol content (ABV)</span>
+          <input type="text" id="f-abv" placeholder="e.g. 45" autocomplete="off" /></label>
+        <label class="field"><span class="lbl">Net contents</span>
+          <input type="text" id="f-net" placeholder="e.g. 750 mL" autocomplete="off" /></label>
+      </div>
+
+      <button class="primary" type="submit" id="single-submit">Verify label</button>
+    </form>
+
+    <div class="panel" id="single-result-panel">
+      <h2>Result</h2>
+      <div id="single-result"><p class="empty">No label checked yet. Upload an image and press <b>Verify label</b>.</p></div>
+    </div>
+  </section>
+
+  <!-- ================= BATCH ================= -->
+  <section id="view-batch" role="tabpanel" aria-labelledby="tab-batch" hidden>
+    <form class="panel" id="batch-form" novalidate>
+      <h2>Verify a batch</h2>
+      <p class="hint">Upload many labels at once. The application values below are applied to every label in the batch.</p>
+
+      <div class="file-row">
+        <label for="batch-images"><strong>1. Choose label images</strong></label><br/>
+        <input type="file" id="batch-images" accept="image/*" multiple required />
+        <div class="picked" id="batch-images-name" aria-live="polite"></div>
+      </div>
+
+      <p><strong>2. Application values (applied to all)</strong></p>
+      <div class="grid2">
+        <label class="field"><span class="lbl">Brand name</span>
+          <input type="text" id="b-brand" autocomplete="off" /></label>
+        <label class="field"><span class="lbl">Class / type</span>
+          <input type="text" id="b-class" autocomplete="off" /></label>
+        <label class="field"><span class="lbl">Alcohol content (ABV)</span>
+          <input type="text" id="b-abv" autocomplete="off" /></label>
+        <label class="field"><span class="lbl">Net contents</span>
+          <input type="text" id="b-net" autocomplete="off" /></label>
+      </div>
+
+      <button class="primary" type="submit" id="batch-submit">Start batch</button>
+    </form>
+
+    <div class="panel" id="batch-result-panel">
+      <h2>Batch progress</h2>
+      <div id="batch-result"><p class="empty">No batch running. Choose images and press <b>Start batch</b>.</p></div>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+/* ------------------------------------------------------------------------- *
+ * Vanilla JS. Talks to the same-origin FastAPI service:
+ *   POST /verify            -> VerificationResult
+ *   POST /jobs              -> {job_id}
+ *   GET  /jobs/{job_id}     -> JobStatus  (polled every 1.5s)
+ * Rendering follows the result JSON shape in README §8 / schemas.py.
+ * ------------------------------------------------------------------------- */
+
+const VERDICTS = { pass: "Pass", fail: "Fail", needs_review: "Needs review" };
+const MARKS    = { pass: "✔", fail: "✖", needs_review: "⚠" }; // check, cross, warn
+const FIELD_LABELS = {
+  brand_name: "Brand name", class_type: "Class / type",
+  abv: "Alcohol content", net_contents: "Net contents",
+};
+const POLL_MS = 1500;
+
+const $ = (id) => document.getElementById(id);
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+function vClass(v) { return VERDICTS[v] ? v : "needs_review"; }
+function vLabel(v) { return VERDICTS[v] || String(v || "").replace(/_/g, " "); }
+function prettyFlag(f) { return String(f).replace(/_/g, " "); }
+function fmtNum(n) { return (typeof n === "number" && isFinite(n)) ? Math.round(n * 10) / 10 : null; }
+
+/* ---- Tab switching ------------------------------------------------------ */
+function selectTab(which) {
+  const single = which === "single";
+  $("tab-single").setAttribute("aria-selected", String(single));
+  $("tab-batch").setAttribute("aria-selected", String(!single));
+  $("view-single").hidden = !single;
+  $("view-batch").hidden = single;
+}
+$("tab-single").addEventListener("click", () => selectTab("single"));
+$("tab-batch").addEventListener("click", () => selectTab("batch"));
+
+/* ---- File-picker labels ------------------------------------------------- */
+$("single-image").addEventListener("change", (e) => {
+  const f = e.target.files && e.target.files[0];
+  $("single-image-name").textContent = f ? `Selected: ${f.name}` : "";
+});
+$("batch-images").addEventListener("change", (e) => {
+  const n = e.target.files ? e.target.files.length : 0;
+  $("batch-images-name").textContent = n ? `Selected: ${n} image${n === 1 ? "" : "s"}` : "";
+});
+
+/* ---- Build an ApplicationData object from form inputs ------------------- *
+ * Only non-empty fields are included (the verifier skips omitted fields).   */
+function gatherApplication(ids) {
+  const app = {};
+  const map = { brand: "brand_name", class: "class_type", abv: "abv", net: "net_contents" };
+  for (const [shortKey, value] of Object.entries(ids)) {
+    const v = (value || "").trim();
+    if (v) app[map[shortKey]] = v;
+  }
+  return app;
+}
+
+/* ===================== SINGLE-LABEL FLOW ================================= */
+$("single-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const file = $("single-image").files[0];
+  const out = $("single-result");
+  const btn = $("single-submit");
+
+  if (!file) {
+    renderError(out, "Please choose a label image first.");
+    return;
+  }
+  const application = gatherApplication({
+    brand: $("f-brand").value, class: $("f-class").value,
+    abv: $("f-abv").value, net: $("f-net").value,
+  });
+
+  const fd = new FormData();
+  fd.append("image", file);
+  fd.append("application", JSON.stringify(application));
+
+  btn.disabled = true;
+  out.innerHTML = "";
+  out.appendChild(loadingBanner("Verifying label… this usually takes a few seconds."));
+
+  try {
+    const resp = await fetch("/verify", { method: "POST", body: fd });
+    if (!resp.ok) {
+      const msg = resp.status === 413
+        ? "That image is too large to verify. Please use a smaller file."
+        : await errorText(resp);
+      renderError(out, msg);
+      return;
+    }
+    const result = await resp.json();
+    out.innerHTML = "";
+    out.appendChild(renderResult(result, URL.createObjectURL(file)));
+  } catch (err) {
+    renderError(out, "Could not reach the verification service. " + (err && err.message ? err.message : ""));
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+/* ===================== BATCH FLOW ======================================== */
+let batchTimer = null;
+
+$("batch-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const files = Array.from($("batch-images").files || []);
+  const out = $("batch-result");
+  const btn = $("batch-submit");
+
+  if (!files.length) {
+    renderError(out, "Please choose at least one label image.");
+    return;
+  }
+  const application = gatherApplication({
+    brand: $("b-brand").value, class: $("b-class").value,
+    abv: $("b-abv").value, net: $("b-net").value,
+  });
+
+  // One manifest applied to all labels (server accepts a single field dict).
+  const fd = new FormData();
+  for (const f of files) fd.append("images", f);
+  fd.append("manifest", JSON.stringify(application));
+
+  btn.disabled = true;
+  if (batchTimer) { clearInterval(batchTimer); batchTimer = null; }
+  out.innerHTML = "";
+  out.appendChild(loadingBanner(`Uploading ${files.length} label${files.length === 1 ? "" : "s"}…`));
+
+  try {
+    const resp = await fetch("/jobs", { method: "POST", body: fd });
+    if (!resp.ok) {
+      renderError(out, resp.status === 413
+        ? "One of the images is too large. Please use smaller files."
+        : await errorText(resp));
+      btn.disabled = false;
+      return;
+    }
+    const { job_id } = await resp.json();
+    if (!job_id) {
+      renderError(out, "The service did not return a job id.");
+      btn.disabled = false;
+      return;
+    }
+    pollJob(job_id, out, btn);
+  } catch (err) {
+    renderError(out, "Could not start the batch. " + (err && err.message ? err.message : ""));
+    btn.disabled = false;
+  }
+});
+
+function pollJob(jobId, out, btn) {
+  const tick = async () => {
+    try {
+      const resp = await fetch(`/jobs/${encodeURIComponent(jobId)}`);
+      if (resp.status === 404) {
+        stopPolling();
+        renderError(out, "That batch job could not be found (it may have expired).");
+        btn.disabled = false;
+        return;
+      }
+      if (!resp.ok) { return; } // transient: keep polling
+      const job = await resp.json();
+      renderJob(job, out);
+      const complete = (job.completed + job.failed) >= job.total && job.total > 0;
+      if (complete) { stopPolling(); btn.disabled = false; }
+    } catch (_e) {
+      // network blip: keep polling, leave last-rendered state on screen
+    }
+  };
+  function stopPolling() { if (batchTimer) { clearInterval(batchTimer); batchTimer = null; } }
+  tick(); // immediate first read, then every POLL_MS
+  batchTimer = setInterval(tick, POLL_MS);
+}
+
+/* ===================== RENDERERS ========================================= */
+function loadingBanner(text) {
+  const b = el("div", "status loading");
+  b.appendChild(el("span", "spinner"));
+  b.appendChild(document.createTextNode(text));
+  return b;
+}
+function renderError(container, msg) {
+  container.innerHTML = "";
+  const b = el("div", "status error", "Error: " + msg);
+  container.appendChild(b);
+}
+async function errorText(resp) {
+  try {
+    const data = await resp.json();
+    if (data && data.detail) {
+      return typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
+    }
+  } catch (_e) { /* fall through */ }
+  return `The service responded with status ${resp.status}.`;
+}
+
+/* Render a full VerificationResult into a fragment. */
+function renderResult(r, imageUrl) {
+  const frag = document.createDocumentFragment();
+  const overallV = vClass(r.overall);
+
+  // Visual audit overlay: the label image with a labelled, colour-coded box per
+  // region, so a reviewer sees exactly what passed / failed and where.
+  if (imageUrl && Array.isArray(r.regions) && r.regions.length) {
+    frag.appendChild(el("div", "section-title", "Label audit"));
+    frag.appendChild(renderAuditImage(imageUrl, r.regions));
+  }
+
+  // Overall banner
+  const ov = el("div", "overall " + overallV);
+  const left = el("div");
+  left.appendChild(el("div", "lead", "Overall: " + vLabel(r.overall)));
+  const subBits = [];
+  if (r.image_quality) subBits.push("Image quality: " + String(r.image_quality).replace(/_/g, " "));
+  if (typeof r.timing_ms === "number") subBits.push(Math.round(r.timing_ms) + " ms");
+  if (subBits.length) left.appendChild(el("div", "sub", subBits.join(" · ")));
+  ov.appendChild(left);
+  ov.appendChild(el("span", "badge big " + overallV, vLabel(r.overall)));
+  frag.appendChild(ov);
+
+  // Fields checklist
+  frag.appendChild(el("div", "section-title", "Field checks"));
+  const list = el("ul", "checklist");
+  const fields = r.fields || {};
+  const order = ["brand_name", "class_type", "abv", "net_contents"];
+  const keys = Object.keys(fields).sort((a, b) => {
+    const ia = order.indexOf(a), ib = order.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  if (!keys.length) {
+    const li = el("li", "needs_review");
+    li.appendChild(el("span", "mark needs_review", MARKS.needs_review));
+    const body = el("div", "ck-body");
+    body.appendChild(el("div", "ck-name", "No fields submitted"));
+    body.appendChild(el("div", "ck-meta", "No application values were provided, so no fields were checked."));
+    li.appendChild(body);
+    list.appendChild(li);
+  } else {
+    for (const k of keys) list.appendChild(renderFieldItem(k, fields[k]));
+  }
+  frag.appendChild(list);
+
+  // Government warning
+  frag.appendChild(el("div", "section-title", "Government warning"));
+  frag.appendChild(renderWarning(r.warning || {}));
+
+  // Review flags
+  const flags = (r.review_flags || []);
+  if (flags.length) {
+    frag.appendChild(el("div", "section-title", "Review flags"));
+    frag.appendChild(renderFlags(flags));
+  }
+  return frag;
+}
+
+const REGION_LABELS = {
+  brand_name: "Brand", class_type: "Class / type", abv: "ABV",
+  net_contents: "Net contents", government_warning: "Gov. warning",
+};
+
+function renderAuditImage(imageUrl, regions) {
+  const wrap = el("div", "audit-wrap");
+  const img = document.createElement("img");
+  img.className = "audit-img";
+  img.src = imageUrl;
+  img.alt = "Uploaded label with audit boxes";
+  wrap.appendChild(img);
+  for (const reg of regions) {
+    const b = reg.box; // [ymin, xmin, ymax, xmax] normalized 0-1000
+    if (!Array.isArray(b) || b.length !== 4) continue;
+    const cls = reg.verdict ? vClass(reg.verdict) : "info";
+    const box = el("div", "audit-box " + cls);
+    box.style.top = (b[0] / 10) + "%";
+    box.style.left = (b[1] / 10) + "%";
+    box.style.height = Math.max(0, (b[2] - b[0]) / 10) + "%";
+    box.style.width = Math.max(0, (b[3] - b[1]) / 10) + "%";
+    const name = REGION_LABELS[reg.label] || reg.label;
+    const label = reg.verdict ? name + " · " + vLabel(reg.verdict) : name;
+    box.appendChild(el("span", "audit-tag " + cls, label));
+    wrap.appendChild(box);
+  }
+  return wrap;
+}
+
+function renderFieldItem(key, fv) {
+  fv = fv || {};
+  const v = vClass(fv.verdict);
+  const li = el("li", v);
+  li.appendChild(el("span", "mark " + v, MARKS[v]));
+  const body = el("div", "ck-body");
+
+  const nameRow = el("div", "ck-name");
+  nameRow.textContent = FIELD_LABELS[key] || key.replace(/_/g, " ");
+  body.appendChild(nameRow);
+
+  // Extracted vs expected
+  const meta = el("div", "ck-meta");
+  const ex = (fv.extracted != null && fv.extracted !== "") ? fv.extracted : null;
+  const exp = (fv.expected != null && fv.expected !== "") ? fv.expected : null;
+  if (ex != null || exp != null) {
+    meta.appendChild(document.createTextNode("On label: "));
+    meta.appendChild(el("b", null, ex != null ? ex : "(none read)"));
+    meta.appendChild(el("span", "vs", "  —  Application: "));
+    meta.appendChild(el("b", null, exp != null ? exp : "(none)"));
+  } else {
+    meta.textContent = "Verdict: " + vLabel(fv.verdict);
+  }
+  body.appendChild(meta);
+
+  // Similarity + confidence
+  const extra = [];
+  const sim = fmtNum(fv.similarity);
+  if (sim != null) extra.push("Match " + sim + "%");
+  const conf = fmtNum(typeof fv.confidence === "number" ? fv.confidence * 100 : null);
+  if (conf != null) extra.push("Model confidence " + conf + "%");
+  if (extra.length) {
+    const e2 = el("div", "ck-meta");
+    e2.textContent = extra.join("  ·  ");
+    body.appendChild(e2);
+  }
+  if (fv.note) body.appendChild(el("div", "ck-note", "Note: " + prettyFlag(fv.note)));
+
+  li.appendChild(body);
+  // verdict badge on the right edge of the row
+  const badge = el("span", "badge " + v, vLabel(fv.verdict));
+  badge.style.alignSelf = "flex-start";
+  li.appendChild(badge);
+  return li;
+}
+
+function renderWarning(w) {
+  const v = vClass(w.verdict);
+  const li = el("li", v);
+  // reuse checklist row styling inside its own list for visual consistency
+  const wrap = el("ul", "checklist");
+  li.appendChild(el("span", "mark " + v, MARKS[v]));
+  const body = el("div", "ck-body");
+  body.appendChild(el("div", "ck-name", "Mandatory health warning"));
+
+  const facts = [];
+  facts.push((w.exact_match ? "Matches" : "Does not match") + " the required text");
+  if (w.caps_ok === true) facts.push("Header in caps");
+  else if (w.caps_ok === false) facts.push("Header NOT in caps");
+  if (w.readings_agree === true) facts.push("OCR and model readings agree");
+  else if (w.readings_agree === false) facts.push("OCR and model readings disagree");
+  const ar = fmtNum(w.agreement_ratio);
+  if (ar != null) facts.push("Agreement " + ar + "%");
+  const meta = el("div", "ck-meta");
+  meta.textContent = facts.join("  ·  ");
+  body.appendChild(meta);
+
+  if (w.canonical_version) {
+    body.appendChild(el("div", "ck-meta", "Reference text version: " + w.canonical_version));
+  }
+
+  // Per-component breakdown (header + the two clauses)
+  const comps = w.components || [];
+  if (comps.length) {
+    const cl = el("ul", "components");
+    for (const c of comps) {
+      const ok = c.present !== false;
+      const row = el("li");
+      row.appendChild(el("span", "dot " + (ok ? "ok" : "bad")));
+      row.appendChild(el("span", "cname", String(c.name || "component").replace(/_/g, " ")));
+      const detail = [];
+      if (c.absent === true) detail.push("missing / reworded");
+      else if (c.present === false) detail.push("unclear — needs review");
+      if (typeof c.similarity === "number") detail.push("match " + c.similarity + "%");
+      if (detail.length) row.appendChild(el("span", "cmeta", "(" + detail.join(", ") + ")"));
+      cl.appendChild(row);
+    }
+    body.appendChild(cl);
+  }
+
+  // Warning-specific review flags
+  if ((w.review_flags || []).length) {
+    body.appendChild(renderFlags(w.review_flags));
+  }
+
+  li.appendChild(body);
+  const badge = el("span", "badge " + v, vLabel(w.verdict));
+  badge.style.alignSelf = "flex-start";
+  li.appendChild(badge);
+  wrap.appendChild(li);
+  return wrap;
+}
+
+function renderFlags(flags) {
+  const box = el("div", "flags");
+  for (const f of flags) box.appendChild(el("span", "flag", prettyFlag(f)));
+  return box;
+}
+
+/* ---- Batch job rendering ------------------------------------------------ */
+function renderJob(job, container) {
+  // Preserve which items the user has expanded across polls.
+  const openSet = new Set();
+  container.querySelectorAll(".item.open").forEach((n) => {
+    if (n.dataset.idx != null) openSet.add(n.dataset.idx);
+  });
+
+  container.innerHTML = "";
+
+  const total = job.total || 0;
+  const done = (job.completed || 0);
+  const failed = (job.failed || 0);
+  const finished = done + failed;
+  const complete = finished >= total && total > 0;
+  const pct = total ? Math.round((finished / total) * 100) : 0;
+
+  // Progress bar
+  const wrap = el("div", "progress-wrap");
+  const metaRow = el("div", "progress-meta");
+  metaRow.appendChild(el("span", null,
+    complete ? "Complete" : "Processing…"));
+  metaRow.appendChild(el("span", null,
+    `${finished} / ${total} done` + (failed ? ` (${failed} with issues)` : "")));
+  wrap.appendChild(metaRow);
+  const bar = el("div", "progress-bar");
+  const fill = el("div", "progress-fill" + (complete ? " complete" : ""));
+  fill.style.width = pct + "%";
+  bar.appendChild(fill);
+  wrap.appendChild(bar);
+  container.appendChild(wrap);
+
+  if (!complete && finished === 0) {
+    container.appendChild(loadingBanner("Waiting for results…"));
+  }
+
+  // Per-item list
+  const items = (job.items || []).slice().sort((a, b) => (a.index || 0) - (b.index || 0));
+  for (const it of items) container.appendChild(renderJobItem(it, openSet));
+}
+
+function renderJobItem(it, openSet) {
+  const wrap = el("div", "item");
+  wrap.dataset.idx = String(it.index);
+  const expandable = it.status === "done" && it.result;
+  const wasOpen = openSet.has(String(it.index));
+  if (expandable && wasOpen) wrap.classList.add("open");
+
+  const head = el("div", "item-head");
+  head.appendChild(el("span", "idx", "#" + ((it.index || 0) + 1)));
+  head.appendChild(el("span", "fname", it.filename || "(unnamed)"));
+
+  // overall verdict badge if we have a result, else status pill
+  if (expandable && it.result.overall) {
+    const ov = vClass(it.result.overall);
+    head.appendChild(el("span", "badge " + ov, vLabel(it.result.overall)));
+  }
+  const statusPill = el("span", "pill " + (it.status || "pending"),
+    (it.status || "pending"));
+  head.appendChild(statusPill);
+
+  const chev = el("span", "chev", expandable ? "▶" : "");
+  head.appendChild(chev);
+  wrap.appendChild(head);
+
+  if (expandable) {
+    const bodyEl = el("div", "item-body");
+    bodyEl.hidden = !wasOpen;
+    bodyEl.appendChild(renderResult(it.result));
+    wrap.appendChild(bodyEl);
+    head.addEventListener("click", () => {
+      const open = wrap.classList.toggle("open");
+      bodyEl.hidden = !open;
+    });
+  } else if (it.status === "error") {
+    const bodyEl = el("div", "item-body");
+    bodyEl.hidden = false;
+    bodyEl.appendChild(el("div", "status error", "Error: " + (it.error || "verification failed.")));
+    wrap.appendChild(bodyEl);
+  } else if (it.status === "duplicate") {
+    const bodyEl = el("div", "item-body");
+    bodyEl.hidden = false;
+    bodyEl.appendChild(el("p", "ck-meta", "Skipped — an identical label was already verified in this batch."));
+    wrap.appendChild(bodyEl);
+  }
+  return wrap;
+}
+</script>
+</body>
+</html>

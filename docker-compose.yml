@@ -1,0 +1,141 @@
+# Self-hosted stack for the AI Label Verification Prototype (README §4/§7).
+#
+# DEFAULT PROFILE = CPU. `docker compose up --build` runs the whole thing with NO
+# GPU: Gemma 4 is served on CPU by Ollama, plus Redis + the FastAPI API + the arq
+# worker pool. Everything stays inside the boundary — no outbound ML traffic.
+#
+#     docker compose up --build
+#       UI:       http://localhost:8000
+#       API docs: http://localhost:8000/docs
+#       Ollama:   http://localhost:11434
+#
+# Pick the model with GEMMA_MODEL (must be a VISION-capable Gemma 4 tag — never a
+# *-mlx tag, which is text-only and can't read a label):
+#       gemma4:e2b   ~7.2 GB  — lightest, best on a constrained laptop
+#       gemma4:e4b   ~9.6 GB  — default ("cheap deploy", README §6)
+#       gemma4:12b   ~7.6 GB  — higher accuracy, ~16 GB RAM
+# CPU inference is SLOW (seconds to minutes per label) — the sub-5s SLA is a GPU
+# target; INFERENCE_TIMEOUT_S is raised accordingly. Give Docker enough RAM
+# (≥12 GB for e4b; use gemma4:e2b if memory-constrained).
+#
+# GPU PROFILE (opt-in): the production target serves Gemma 4 on a GPU via vLLM.
+#       docker compose --profile gpu up --build      # also starts the `vllm` service
+# then point the API/worker at it by setting in .env:
+#       INFERENCE_BACKEND=vllm
+#       VLLM_BASE_URL=http://vllm:8001/v1
+#
+# ---------------------------------------------------------------------------
+# LAPTOP / MOCK PROFILE — no compose needed at all. The repo runs end-to-end
+# with no model, no Redis, no tesseract:
+#       pip install -r requirements.txt && uvicorn app:app
+# (defaults: INFERENCE_BACKEND=mock, OCR_BACKEND=mock, no REDIS_URL; batch runs
+# on the in-process asyncio executor.)
+# ---------------------------------------------------------------------------
+
+services:
+  # Ephemeral queue + results store (README §4). No volume on purpose: nothing
+  # sensitive is persisted to disk (Marcus's constraint, README §1).
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Self-hosted Gemma 4 on CPU via Ollama (OpenAI-compatible at :11434/v1).
+  # The named volume caches the (public) model weights so a restart doesn't
+  # re-download them — that's model data, not label data.
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 18  # generous: first boot + model load can be slow on CPU
+
+  # One-shot: pull the chosen Gemma 4 tag, then exit. The API + worker wait for
+  # this to complete so the first request never hits a missing-model error.
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["sh", "-c", "ollama pull ${GEMMA_MODEL:-gemma4:e4b}"]
+    restart: "no"
+
+  # Interactive lane: FastAPI app (POST /verify, /jobs; GET /jobs/{id}, /health)
+  # + the single-page UI. Tesseract is baked into this image for OCR_BACKEND=tesseract.
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-ollama}
+      OLLAMA_BASE_URL: http://ollama:11434/v1
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://vllm:8001/v1}
+      GEMMA_MODEL: ${GEMMA_MODEL:-gemma4:e4b}
+      OCR_BACKEND: tesseract
+      REDIS_URL: redis://redis:6379
+      INFERENCE_TIMEOUT_S: ${INFERENCE_TIMEOUT_S:-180}
+    depends_on:
+      redis:
+        condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  # Batch lane: drains the Redis queue and runs the same extract -> verify steps.
+  # Same image as `api`, different entrypoint. Scale with --scale worker=N.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-ollama}
+      OLLAMA_BASE_URL: http://ollama:11434/v1
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://vllm:8001/v1}
+      GEMMA_MODEL: ${GEMMA_MODEL:-gemma4:e4b}
+      OCR_BACKEND: tesseract
+      REDIS_URL: redis://redis:6379
+      INFERENCE_TIMEOUT_S: ${INFERENCE_TIMEOUT_S:-180}
+    depends_on:
+      redis:
+        condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
+    command: ["arq", "worker.WorkerSettings"]
+
+  # GPU production target (opt-in): Gemma 4 on a GPU via vLLM. Started only with
+  # `--profile gpu`. Requires an NVIDIA GPU + the NVIDIA Container Toolkit and a
+  # Hugging Face token for the gated weights. Set INFERENCE_BACKEND=vllm to use it.
+  vllm:
+    profiles: ["gpu"]
+    build:
+      context: .
+      dockerfile: Dockerfile.vllm
+    ports:
+      - "8001:8001"
+    environment:
+      GEMMA_MODEL: ${GEMMA_MODEL:-google/gemma-4-12B}
+      HF_TOKEN: ${HF_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+
+volumes:
+  ollama_models:

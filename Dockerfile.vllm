@@ -1,0 +1,44 @@
+# Self-hosted Gemma 4 inference image (the GPU service).
+#
+# This is the "model on a GPU inside the boundary" from README §4/§7 — no
+# outbound ML traffic, which is what satisfies Marcus's firewall constraint.
+# It wraps the upstream vLLM OpenAI-compatible server and serves Gemma 4 with
+# guided/structured JSON decoding so the verifier always receives valid JSON.
+#
+# The base image already ships vLLM and its CUDA runtime; we only layer in the
+# default serving command and document the knobs.
+FROM vllm/vllm-openai:latest
+
+# --- Hugging Face auth -------------------------------------------------------
+# Gemma 4 weights are gated. Provide a token with access at run time:
+#   docker run -e HF_TOKEN=hf_xxx ...   (docker-compose passes it through)
+# vLLM / huggingface_hub read HUGGING_FACE_HUB_TOKEN; we mirror HF_TOKEN to it.
+ENV HF_TOKEN="" \
+    HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
+
+# --- Model selection ---------------------------------------------------------
+# Override per deploy. README §6:
+#   google/gemma-4-12B  -> default OCR/extraction model
+#   google/gemma-4-31B  -> max accuracy (fits a single 80GB H100 in bf16)
+#   google/gemma-4-E4B  -> cheap deploy / modest card (good for the demo window)
+ENV GEMMA_MODEL="google/gemma-4-12B"
+
+# Exposed on 8001 so it never collides with the API on 8000. The API reaches it
+# at http://vllm:8001/v1 inside compose (VLLM_BASE_URL).
+EXPOSE 8001
+
+# --- GPU requirements --------------------------------------------------------
+# Requires an NVIDIA GPU + the NVIDIA Container Toolkit on the host. Run with
+# `--gpus all` (docker run) or the `deploy.resources.reservations.devices`
+# block in docker-compose.yml. VRAM depends on the chosen model — verify
+# against the Gemma 4 model card (README §7).
+#
+# `--guided-decoding-backend` enforces the ModelExtraction JSON schema that the
+# VLLMInferenceClient passes as `guided_json` (vLLM structured output), so the
+# model returns ONLY the contract JSON. `xgrammar` is the fast default backend.
+ENTRYPOINT []
+CMD vllm serve "${GEMMA_MODEL}" \
+    --host 0.0.0.0 \
+    --port 8001 \
+    --guided-decoding-backend xgrammar \
+    --trust-remote-code

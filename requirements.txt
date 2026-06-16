@@ -1,0 +1,36 @@
+# AI Label Verification Prototype — runtime dependencies.
+#
+# Pinned to compatible release ranges (`~=`) so a fresh build is reproducible
+# without freezing patch-level security fixes. The whole service runs on these
+# alone in the laptop/mock profile (INFERENCE_BACKEND=mock, OCR_BACKEND=mock,
+# no Redis); the GPU/Redis paths layer on top via docker-compose.
+
+# --- API / web ---------------------------------------------------------------
+fastapi~=0.137            # ASGI app framework (POST /verify, /jobs; GET /jobs/{id})
+uvicorn[standard]~=0.49   # ASGI server (the [standard] extra pulls in uvloop/httptools)
+python-multipart~=0.0.32  # required by FastAPI to parse multipart/form-data uploads
+
+# --- Data models / config ----------------------------------------------------
+pydantic~=2.13            # v2 schemas (schemas.py)
+pydantic-settings~=2.14   # env-driven Settings (config.py)
+
+# --- Verification core --------------------------------------------------------
+rapidfuzz~=3.14           # fuzzy field matching + warning agreement ratio
+
+# --- Inference client ---------------------------------------------------------
+httpx~=0.28               # async OpenAI-compatible calls to the self-hosted model (Ollama/vLLM)
+
+# --- Image handling / OCR -----------------------------------------------------
+pillow~=12.2              # crop the warning bbox before OCR; decode uploaded images
+# pytesseract is OPTIONAL — only needed when OCR_BACKEND=tesseract. It is a thin
+# wrapper that shells out to the `tesseract` system binary, which must be
+# installed separately (see Dockerfile). The mock OCR backend needs neither, so
+# this stays installable on a laptop/CI box with no tesseract present.
+pytesseract~=0.3          # optional: real OCR backend (requires the tesseract-ocr binary)
+
+# --- Batch lane (Redis stream + worker pool) ---------------------------------
+arq~=0.28                 # async Redis-native task queue (worker.py)
+redis~=5.3                # redis.asyncio client (RedisJobStore + arq pool)
+
+# --- Tests --------------------------------------------------------------------
+pytest~=9.1               # test runner (no pytest-asyncio — tests drive asyncio.run themselves)
