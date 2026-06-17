@@ -113,6 +113,37 @@ def test_unreadable_image_is_needs_review():
     assert "warning:not_located" in result.review_flags
 
 
+def test_extraction_failure_degrades_to_needs_review():
+    # A backend error or truncated/unparseable model output (a hard real-world
+    # photo) must degrade to needs_review:unreadable, never raise (→ no 502).
+    from inference import InferenceError
+
+    class _FailingInference:
+        async def extract(self, image_bytes, *, application=None):
+            raise InferenceError("model output did not match the extraction schema")
+
+        async def aclose(self):
+            return None
+
+    ocr_client = build_ocr_client(SETTINGS)
+
+    async def _go():
+        try:
+            return await verify_label(
+                b"\x89PNG not-json", ApplicationData(brand_name="X"),
+                inference_client=_FailingInference(), ocr_client=ocr_client,
+                settings=SETTINGS,
+            )
+        finally:
+            await ocr_client.aclose()
+
+    result = asyncio.run(_go())
+    assert result.overall is Verdict.NEEDS_REVIEW
+    assert result.image_quality is ImageQuality.UNREADABLE
+    assert "extraction_failed" in result.review_flags
+    assert result.fields == {}
+
+
 def test_unreadable_image_clamps_a_field_fail_to_needs_review():
     # Even with a high-confidence, clearly-mismatched field, an UNREADABLE photo
     # must NOT produce overall=FAIL — it clamps to needs_review (README §9).

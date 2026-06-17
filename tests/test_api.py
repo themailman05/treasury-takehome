@@ -108,14 +108,15 @@ def test_unknown_job_returns_404():
     assert resp.status_code == 404
 
 
-def test_verify_returns_clean_502_on_inference_error():
-    # A self-hosted model that is down/erroring must surface as a controlled 502,
-    # never a 500 stack trace, to the non-technical agent on the other end.
+def test_verify_degrades_to_needs_review_on_inference_error():
+    # A model/backend failure (or truncated/unparseable output on a hard photo)
+    # degrades to needs_review:unreadable — a clean 200, never a 5xx — so one bad
+    # label never errors the agent (README §9). The pipeline catches InferenceError.
     from inference import InferenceError
 
     class _FailingClient:
         async def extract(self, image_bytes, *, application=None):
-            raise InferenceError("backend down")
+            raise InferenceError("model output did not match the extraction schema")
 
         async def aclose(self):
             return None
@@ -127,5 +128,7 @@ def test_verify_returns_clean_502_on_inference_error():
             files={"image": ("label.png", _png_bytes(), "image/png")},
             data={"application": json.dumps(CLEAN_APP)},
         )
-    assert resp.status_code == 502
-    assert "inference backend" in resp.json()["detail"]
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["overall"] == "needs_review"
+    assert "extraction_failed" in body["review_flags"]

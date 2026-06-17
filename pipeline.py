@@ -23,6 +23,7 @@ the field and warning checks best-effort so the agent sees whatever could be rea
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import asdict
@@ -30,7 +31,7 @@ from typing import Optional
 
 from config import Settings, get_settings
 from enums import ImageQuality, Verdict
-from inference import InferenceClient
+from inference import InferenceClient, InferenceError
 from ocr import OCRClient
 from schemas import (
     ApplicationData,
@@ -43,6 +44,8 @@ from schemas import (
 from verify_fields import verify_fields
 from verify_warning import WarningResult, verify_warning
 
+logger = logging.getLogger("label_verification.pipeline")
+
 # Severity ranking for the overall roll-up: a single FAIL dominates, a
 # NEEDS_REVIEW beats a clean PASS, and the worst wins.
 _SEVERITY: dict[Verdict, int] = {
@@ -50,6 +53,30 @@ _SEVERITY: dict[Verdict, int] = {
     Verdict.NEEDS_REVIEW: 1,
     Verdict.FAIL: 2,
 }
+
+
+def _unreadable_result(settings: Settings, start: float, flag: str) -> VerificationResult:
+    """A graceful ``needs_review`` result when the model can't be read/parsed.
+
+    A hard real-world photo (or a truncated/invalid model response) must never
+    surface as a 500/502 — per the brief, a bad image resolves to
+    ``needs_review: unreadable`` so one bad photo never fails the request (or a
+    whole batch). No fields/regions; the warning is left for a human."""
+    cv = settings.warning_text_version
+    return VerificationResult(
+        fields={},
+        warning=WarningVerdict(
+            verdict=Verdict.NEEDS_REVIEW, exact_match=False, caps_ok=None,
+            readings_agree=None, agreement_ratio=None, canonical_version=cv,
+            components=[], review_flags=[flag],
+        ),
+        overall=Verdict.NEEDS_REVIEW,
+        image_quality=ImageQuality.UNREADABLE,
+        review_flags=[flag, "unreadable"],
+        canonical_version=cv,
+        timing_ms=round((time.perf_counter() - start) * 1000.0, 2),
+        regions=[],
+    )
 
 
 def _coerce_quality(value: object) -> ImageQuality:
@@ -176,10 +203,17 @@ async def verify_label(
     settings = settings or get_settings()
     start = time.perf_counter()
 
-    # 1. Extract — the model reads text only; it makes no judgements.
-    ext: ModelExtraction = await inference_client.extract(
-        image_bytes, application=application
-    )
+    # 1. Extract — the model reads text only; it makes no judgements. If the
+    #    backend errors or returns unparseable/truncated output (a hard real-world
+    #    photo can make the model run away past the token cap), degrade to
+    #    needs_review:unreadable rather than erroring the request (README §9).
+    try:
+        ext: ModelExtraction = await inference_client.extract(
+            image_bytes, application=application
+        )
+    except InferenceError as exc:
+        logger.warning("extraction failed, returning needs_review: %s", exc)
+        return _unreadable_result(settings, start, "extraction_failed")
     quality = _coerce_quality(ext.image_quality)
 
     # 2. OCR-fill rule: the warning is the one field that must not be judged on the

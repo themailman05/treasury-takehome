@@ -41,8 +41,11 @@ from pydantic import ValidationError
 # number of image tiles, so a full-res ~2 MP label is slow; field text stays
 # legible at this size and the warning's authoritative reading is full-res OCR.
 _MAX_IMAGE_DIM = 1024
-# Bound generation so a model can't run away (the extraction JSON is well under this).
-_MAX_OUTPUT_TOKENS = 768
+# Bound generation so a model can't run away. The extraction JSON is normally
+# ~300 tokens; the headroom covers verbose/photographed labels. If a label still
+# blows this cap the output is truncated → InferenceError → the pipeline degrades
+# it to needs_review (never a 502).
+_MAX_OUTPUT_TOKENS = 1024
 
 
 def _downscale_for_vlm(image_bytes: bytes, max_dim: int = _MAX_IMAGE_DIM) -> bytes:
@@ -427,6 +430,7 @@ class OllamaInferenceClient(InferenceClient):
             "stream": False,
             "think": False,  # Gemma 4 reasons by default; disable it or content comes back empty
             "format": EXTRACTION_JSON_SCHEMA,  # schema-constrained -> valid ModelExtraction
+            "keep_alive": -1,  # keep the model resident — avoids a ~30s cold-start reload after idle
             "options": {"num_predict": _MAX_OUTPUT_TOKENS, "temperature": 0.0},
         }
         try:
