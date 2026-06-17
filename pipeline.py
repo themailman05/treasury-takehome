@@ -221,10 +221,14 @@ async def verify_label(
     #    deterministic reading, read it now from the authoritative OCR client.
     if not (ext.warning.ocr_text or "").strip():
         # The warning is mandatory, so always read it deterministically (don't rely
-        # on the model's `located` flag). OCR the full label, then narrow to the
-        # warning span for the comparator.
-        full_ocr = await ocr_client.read_region(image_bytes, ext.warning.bbox)
+        # on the model's `located` flag). OCR locates + reads the warning and
+        # returns its box; narrow the text to the warning span for the comparator.
+        full_ocr, ocr_box = await ocr_client.read_region(image_bytes, ext.warning.bbox)
         ext.warning.ocr_text = _warning_span(full_ocr)
+        # Prefer the OCR-located box for the audit overlay — it's grounded in the
+        # actual warning text, unlike the model's (often absent/imprecise) box.
+        if ocr_box:
+            ext.warning.box = ocr_box
 
     # 3. Judge — deterministic field matching + the strict dual-path warning check.
     #    These run even for a POOR/UNREADABLE image so the agent sees a best-effort

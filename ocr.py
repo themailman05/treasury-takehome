@@ -26,11 +26,15 @@ class OCRClient(abc.ABC):
     """Reads text from a (cropped) region of a label image."""
 
     @abc.abstractmethod
-    async def read_region(self, image_bytes: bytes, bbox: Optional[list[int]]) -> str:
-        """OCR the region ``bbox`` (``[x, y, w, h]``); full image when ``bbox`` is None.
+    async def read_region(
+        self, image_bytes: bytes, bbox: Optional[list[int]]
+    ) -> tuple[str, Optional[list[int]]]:
+        """Locate and OCR the government warning.
 
-        Returns the literal recognized text, case-preserving and untrimmed of its
-        meaning — the deterministic, authoritative reading of the warning.
+        Returns ``(text, box)``: the literal recognized warning text
+        (case-preserving), and the warning's bounding box as
+        ``[ymin, xmin, ymax, xmax]`` normalized 0-1000 (for the audit overlay),
+        or ``None`` if it couldn't be localized. ``bbox`` is a hint, unused.
         """
         raise NotImplementedError
 
@@ -50,9 +54,11 @@ class MockOCR(OCRClient):
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self._settings = settings or get_settings()
 
-    async def read_region(self, image_bytes: bytes, bbox: Optional[list[int]]) -> str:
-        """Return the canonical warning string (bbox/image are ignored)."""
-        return canonical_warning(self._settings.warning_text_version)
+    async def read_region(
+        self, image_bytes: bytes, bbox: Optional[list[int]]
+    ) -> tuple[str, Optional[list[int]]]:
+        """Return the canonical warning string and no box (bbox/image ignored)."""
+        return canonical_warning(self._settings.warning_text_version), None
 
     async def aclose(self) -> None:
         """No resources to release."""
@@ -73,20 +79,19 @@ class TesseractOCR(OCRClient):
         import pytesseract  # noqa: F401  (validated here, used in read_region)
         from PIL import Image  # noqa: F401
 
-    async def read_region(self, image_bytes: bytes, bbox: Optional[list[int]]) -> str:
-        """Read the government warning, located by its text anchor.
+    async def read_region(
+        self, image_bytes: bytes, bbox: Optional[list[int]]
+    ) -> tuple[str, Optional[list[int]]]:
+        """Locate and read the government warning by its text anchor.
 
-        The warning can sit anywhere — the bottom of a portrait label, or the
-        middle of the back panel on a front+back layout — so a fixed bottom crop
-        misses it (it read the wrong region in testing). Instead we **find the
-        warning**: upscale the label so the small warning text is legible, locate
-        the ``GOVERNMENT`` anchor with a word-box pass (``image_to_data``), and
-        crop from there to the bottom of the label, then OCR that block
-        (``--psm 6``). Falls back to the bottom of the label if no anchor is found
-        (e.g. the header is too degraded to read).
-
-        ``bbox`` is accepted for interface compatibility but not used — the text
-        anchor is more reliable than the VLM's (downscaled, often absent) box.
+        The warning can sit anywhere — bottom of a portrait label, or mid-panel on
+        a front+back layout — so a fixed bottom crop misses it. Instead we **find**
+        it: upscale the label, locate the ``GOVERNMENT`` anchor with a word-box pass
+        (``image_to_data``), crop from there to the bottom, and OCR that block
+        (``--psm 6``). We also return the warning's bounding box (the union of the
+        anchored words, in the same column) so the audit overlay points at the real
+        warning rather than a guessed region. Falls back to the bottom of the label
+        (and no box) if the header is too degraded to anchor.
         """
         import pytesseract
         from PIL import Image
@@ -101,22 +106,43 @@ class TesseractOCR(OCRClient):
         w, h = image.size
 
         region = None
+        box: Optional[list[int]] = None
         try:
             data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
-            tops = [
-                data["top"][i]
-                for i, t in enumerate(data["text"])
-                if t.strip().lower().startswith("government")
-            ]
-            if tops:
-                region = image.crop((0, max(0, min(tops) - 15), w, h))
+            n = len(data["text"])
+            gov = [i for i in range(n) if data["text"][i].strip().lower().startswith("government")]
+            if gov:
+                ai = min(gov, key=lambda i: data["top"][i])
+                ay, ax = data["top"][ai], data["left"][ai]
+                region = image.crop((0, max(0, ay - 15), w, h))
+                # Warning box = the anchor word + the words below it in the same
+                # column (excludes other panels/columns), so it tracks the real
+                # warning region across layouts.
+                x0s, y0s, x1s, y1s = [], [], [], []
+                for i in range(n):
+                    if not data["text"][i].strip():
+                        continue
+                    try:
+                        conf = float(data["conf"][i])
+                    except (TypeError, ValueError):
+                        conf = -1.0
+                    top, left = data["top"][i], data["left"][i]
+                    if conf >= 30 and ay - 5 <= top <= ay + 0.45 * h and left >= ax - 0.05 * w:
+                        x0s.append(left); y0s.append(top)
+                        x1s.append(left + data["width"][i]); y1s.append(top + data["height"][i])
+                if x0s:
+                    px, py = 0.012 * w, 0.012 * h
+                    x0 = max(0, min(x0s) - px); y0 = max(0, min(y0s) - py)
+                    x1 = min(w, max(x1s) + px); y1 = min(h, max(y1s) + py)
+                    box = [round(y0 / h * 1000), round(x0 / w * 1000),
+                           round(y1 / h * 1000), round(x1 / w * 1000)]
         except Exception:
             region = None
         if region is None:
             region = image.crop((0, int(h * 0.55), w, h))  # fallback: bottom of the label
 
         text: str = pytesseract.image_to_string(region, config="--psm 6")
-        return text.strip()
+        return text.strip(), box
 
     async def aclose(self) -> None:
         """No persistent resources to release."""
