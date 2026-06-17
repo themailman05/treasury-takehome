@@ -41,11 +41,13 @@ from pydantic import ValidationError
 # number of image tiles, so a full-res ~2 MP label is slow; field text stays
 # legible at this size and the warning's authoritative reading is full-res OCR.
 _MAX_IMAGE_DIM = 1024
-# Bound generation so a model can't run away. The extraction JSON is normally
-# ~300 tokens; the headroom covers verbose/photographed labels. If a label still
-# blows this cap the output is truncated → InferenceError → the pipeline degrades
-# it to needs_review (never a 502).
-_MAX_OUTPUT_TOKENS = 1024
+# Anti-runaway bound on the VLM extraction ONLY (fields + boxes; ~285 tokens in
+# practice). NOTE: this never trims the warning — the warning text is read by
+# Tesseract OCR, not the VLM. The cap exists because a busy label once made the
+# model ramble; if a label still blows it, the truncated JSON → InferenceError →
+# the pipeline degrades to needs_review (never a 502). Generous headroom so a
+# legitimate extraction is never trimmed.
+_MAX_OUTPUT_TOKENS = 1536
 
 
 def _downscale_for_vlm(image_bytes: bytes, max_dim: int = _MAX_IMAGE_DIM) -> bytes:

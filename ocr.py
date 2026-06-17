@@ -114,7 +114,6 @@ class TesseractOCR(OCRClient):
             if gov:
                 ai = min(gov, key=lambda i: data["top"][i])
                 ay, ax = data["top"][ai], data["left"][ai]
-                region = image.crop((0, max(0, ay - 15), w, h))
                 # Warning box = the anchor word + the words below it in the same
                 # column (excludes other panels/columns), so it tracks the real
                 # warning region across layouts.
@@ -136,6 +135,16 @@ class TesseractOCR(OCRClient):
                     x1 = min(w, max(x1s) + px); y1 = min(h, max(y1s) + py)
                     box = [round(y0 / h * 1000), round(x0 / w * 1000),
                            round(y1 / h * 1000), round(x1 / w * 1000)]
+                    # Crop TIGHTLY to the warning block (not the full width below the
+                    # anchor) and upscale it, so Tesseract reads big, clean text —
+                    # this is what lifts noisy back-panel clauses out of the
+                    # ambiguous band.
+                    region = image.crop((round(x0), round(y0), round(x1), round(y1)))
+                    if region.size[0] and max(region.size) < 1500:
+                        z = 1500 / max(region.size)
+                        region = region.resize((round(region.size[0] * z), round(region.size[1] * z)))
+                else:
+                    region = image.crop((0, max(0, ay - 15), w, h))
         except Exception:
             region = None
         if region is None:
