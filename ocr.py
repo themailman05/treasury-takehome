@@ -74,32 +74,47 @@ class TesseractOCR(OCRClient):
         from PIL import Image  # noqa: F401
 
     async def read_region(self, image_bytes: bytes, bbox: Optional[list[int]]) -> str:
-        """Read the government warning with a focused, upscaled crop.
+        """Read the government warning, located by its text anchor.
 
-        OCRing the whole label makes Tesseract mis-segment the page and miss the
-        small warning paragraph (it came back with clauses "missing" in testing).
-        Instead we *box* the warning: a first pass locates the ``GOVERNMENT``
-        anchor, we crop from there to the bottom, upscale 2x, and OCR that block
-        with ``--psm 6`` (a single uniform text block). This reads both clauses
-        reliably across labels. Falls back to an upscaled full-image read if the
-        anchor isn't found.
+        The warning can sit anywhere — the bottom of a portrait label, or the
+        middle of the back panel on a front+back layout — so a fixed bottom crop
+        misses it (it read the wrong region in testing). Instead we **find the
+        warning**: upscale the label so the small warning text is legible, locate
+        the ``GOVERNMENT`` anchor with a word-box pass (``image_to_data``), and
+        crop from there to the bottom of the label, then OCR that block
+        (``--psm 6``). Falls back to the bottom of the label if no anchor is found
+        (e.g. the header is too degraded to read).
 
         ``bbox`` is accepted for interface compatibility but not used — the text
-        anchor is more reliable than the VLM's (downscaled) box.
+        anchor is more reliable than the VLM's (downscaled, often absent) box.
         """
         import pytesseract
         from PIL import Image
 
         image = Image.open(BytesIO(image_bytes)).convert("RGB")
+        # Upscale small/low-res labels so both the anchor pass and the final read
+        # have legible text (warning paragraphs are tiny on real captures).
+        longest = max(image.size)
+        if longest < 1800:
+            f = 1800 / longest
+            image = image.resize((round(image.size[0] * f), round(image.size[1] * f)))
         w, h = image.size
-        # The government warning sits at the bottom of the label. Crop the bottom
-        # ~40% and upscale 2x before OCR. Full-page OCR mis-segments the small
-        # warning text (clauses came back "missing"), and the word-box anchor pass
-        # (image_to_data) is unreliable under a restricted service environment, so
-        # we use a fixed bottom crop: deterministic and consistent across processes.
-        # CROP_V0p60 marker.
-        region = image.crop((0, int(h * 0.60), w, h))
-        region = region.resize((region.size[0] * 2, region.size[1] * 2))
+
+        region = None
+        try:
+            data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+            tops = [
+                data["top"][i]
+                for i, t in enumerate(data["text"])
+                if t.strip().lower().startswith("government")
+            ]
+            if tops:
+                region = image.crop((0, max(0, min(tops) - 15), w, h))
+        except Exception:
+            region = None
+        if region is None:
+            region = image.crop((0, int(h * 0.55), w, h))  # fallback: bottom of the label
+
         text: str = pytesseract.image_to_string(region, config="--psm 6")
         return text.strip()
 
