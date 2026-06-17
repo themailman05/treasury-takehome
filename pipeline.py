@@ -220,15 +220,26 @@ async def verify_label(
     #    VLM transcription. If the model located the region but supplied no
     #    deterministic reading, read it now from the authoritative OCR client.
     if not (ext.warning.ocr_text or "").strip():
-        # The warning is mandatory, so always read it deterministically (don't rely
-        # on the model's `located` flag). OCR locates + reads the warning and
-        # returns its box; narrow the text to the warning span for the comparator.
-        full_ocr, ocr_box = await ocr_client.read_region(image_bytes, ext.warning.bbox)
+        # The warning is mandatory, so always read it deterministically. In one OCR
+        # pass we read + box the warning AND OCR-ground each field's overlay box
+        # (the VLM's own boxes are unreliable on complex layouts).
+        field_texts = {
+            name: getattr(ext, name).text
+            for name in ("brand_name", "class_type", "abv", "net_contents")
+            if getattr(ext, name).text.strip()
+        }
+        full_ocr, ocr_box, field_boxes = await ocr_client.read_region(
+            image_bytes, ext.warning.bbox, field_texts
+        )
         ext.warning.ocr_text = _warning_span(full_ocr)
-        # Prefer the OCR-located box for the audit overlay — it's grounded in the
-        # actual warning text, unlike the model's (often absent/imprecise) box.
+        # Prefer the OCR-located box for the overlay — grounded in the actual text,
+        # unlike the model's (often absent/imprecise) box.
         if ocr_box:
             ext.warning.box = ocr_box
+        # Replace the VLM field boxes with OCR-grounded ones; a field we can't
+        # confidently locate gets no box (omitted) rather than a wrong one.
+        for name in ("brand_name", "class_type", "abv", "net_contents"):
+            getattr(ext, name).box = field_boxes.get(name)
 
     # 3. Judge — deterministic field matching + the strict dual-path warning check.
     #    These run even for a POOR/UNREADABLE image so the agent sees a best-effort

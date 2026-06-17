@@ -16,10 +16,47 @@ Two backends, dispatched by ``Settings.ocr_backend``:
 from __future__ import annotations
 
 import abc
+import re
 from io import BytesIO
 from typing import Optional
 
+from rapidfuzz import fuzz
+
 from config import Settings, canonical_warning, get_settings
+
+
+def _norm(t: str) -> str:
+    return re.sub(r"\s+", " ", t or "").strip().lower()
+
+
+def _locate(words: list, query: str, W: int, H: int) -> Optional[list[int]]:
+    """Find the contiguous OCR word-span that best matches ``query`` and return its
+    normalized ``[ymin, xmin, ymax, xmax]`` box (0-1000), or ``None`` if no
+    confident match. ``words`` is a list of ``(text, left, top, w, h)``.
+
+    This grounds a field's overlay box in where its text *actually appears* on the
+    label (via OCR), instead of trusting the VLM's bounding box — which is wildly
+    off on complex layouts.
+    """
+    q = _norm(query)
+    if not q or not words:
+        return None
+    nq = max(1, len(q.split()))
+    best_r, best_span = 0.0, None
+    n = len(words)
+    for length in range(max(1, nq - 1), nq + 3):
+        for i in range(0, n - length + 1):
+            span = words[i:i + length]
+            joined = _norm(" ".join(w[0] for w in span))
+            r = fuzz.ratio(q, joined)
+            if r > best_r:
+                best_r, best_span = r, span
+    if best_r >= 80 and best_span:
+        x0 = min(w[1] for w in best_span); y0 = min(w[2] for w in best_span)
+        x1 = max(w[1] + w[3] for w in best_span); y1 = max(w[2] + w[4] for w in best_span)
+        return [round(y0 / H * 1000), round(x0 / W * 1000),
+                round(y1 / H * 1000), round(x1 / W * 1000)]
+    return None
 
 
 class OCRClient(abc.ABC):
@@ -27,14 +64,20 @@ class OCRClient(abc.ABC):
 
     @abc.abstractmethod
     async def read_region(
-        self, image_bytes: bytes, bbox: Optional[list[int]]
-    ) -> tuple[str, Optional[list[int]]]:
-        """Locate and OCR the government warning.
+        self,
+        image_bytes: bytes,
+        bbox: Optional[list[int]],
+        field_texts: Optional[dict[str, str]] = None,
+    ) -> tuple[str, Optional[list[int]], dict[str, list[int]]]:
+        """Locate + OCR the warning, and OCR-ground the field boxes.
 
-        Returns ``(text, box)``: the literal recognized warning text
-        (case-preserving), and the warning's bounding box as
-        ``[ymin, xmin, ymax, xmax]`` normalized 0-1000 (for the audit overlay),
-        or ``None`` if it couldn't be localized. ``bbox`` is a hint, unused.
+        Returns ``(warning_text, warning_box, field_boxes)``:
+          * ``warning_text`` — the recognized warning text (case-preserving);
+          * ``warning_box`` — its ``[ymin, xmin, ymax, xmax]`` box normalized
+            0-1000, or ``None``;
+          * ``field_boxes`` — ``{field_name: box}`` for each ``field_texts`` entry
+            whose text could be confidently located in the OCR (others omitted).
+        ``bbox`` is a hint, unused.
         """
         raise NotImplementedError
 
@@ -55,10 +98,13 @@ class MockOCR(OCRClient):
         self._settings = settings or get_settings()
 
     async def read_region(
-        self, image_bytes: bytes, bbox: Optional[list[int]]
-    ) -> tuple[str, Optional[list[int]]]:
-        """Return the canonical warning string and no box (bbox/image ignored)."""
-        return canonical_warning(self._settings.warning_text_version), None
+        self,
+        image_bytes: bytes,
+        bbox: Optional[list[int]] = None,
+        field_texts: Optional[dict[str, str]] = None,
+    ) -> tuple[str, Optional[list[int]], dict[str, list[int]]]:
+        """Return the canonical warning string, no box, no field boxes."""
+        return canonical_warning(self._settings.warning_text_version), None, {}
 
     async def aclose(self) -> None:
         """No resources to release."""
@@ -80,25 +126,27 @@ class TesseractOCR(OCRClient):
         from PIL import Image  # noqa: F401
 
     async def read_region(
-        self, image_bytes: bytes, bbox: Optional[list[int]]
-    ) -> tuple[str, Optional[list[int]]]:
-        """Locate and read the government warning by its text anchor.
+        self,
+        image_bytes: bytes,
+        bbox: Optional[list[int]] = None,
+        field_texts: Optional[dict[str, str]] = None,
+    ) -> tuple[str, Optional[list[int]], dict[str, list[int]]]:
+        """Locate + read the warning, and OCR-ground the field boxes — one pass.
 
-        The warning can sit anywhere — bottom of a portrait label, or mid-panel on
-        a front+back layout — so a fixed bottom crop misses it. Instead we **find**
-        it: upscale the label, locate the ``GOVERNMENT`` anchor with a word-box pass
-        (``image_to_data``), crop from there to the bottom, and OCR that block
-        (``--psm 6``). We also return the warning's bounding box (the union of the
-        anchored words, in the same column) so the audit overlay points at the real
-        warning rather than a guessed region. Falls back to the bottom of the label
-        (and no box) if the header is too degraded to anchor.
+        Upscale the label and run a single word-box pass (``image_to_data``). From
+        those words we (1) find the ``GOVERNMENT`` anchor, tight-crop the warning
+        block and OCR it (``--psm 6``), returning its box; and (2) locate each
+        extracted field's text to box it where it actually appears (the VLM's own
+        boxes are unreliable on complex layouts). A field whose text can't be
+        confidently located gets no box (better than a wrong one). Falls back to
+        the bottom of the label if the warning header can't be anchored.
         """
         import pytesseract
         from PIL import Image
 
+        field_texts = field_texts or {}
         image = Image.open(BytesIO(image_bytes)).convert("RGB")
-        # Upscale small/low-res labels so both the anchor pass and the final read
-        # have legible text (warning paragraphs are tiny on real captures).
+        # Upscale small/low-res labels so the word-box pass and final read are legible.
         longest = max(image.size)
         if longest < 1800:
             f = 1800 / longest
@@ -107,38 +155,42 @@ class TesseractOCR(OCRClient):
 
         region = None
         box: Optional[list[int]] = None
+        field_boxes: dict[str, list[int]] = {}
         try:
             data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
-            n = len(data["text"])
-            gov = [i for i in range(n) if data["text"][i].strip().lower().startswith("government")]
+            words = []  # (text, left, top, width, height) for confident words
+            for i in range(len(data["text"])):
+                t = data["text"][i].strip()
+                if not t:
+                    continue
+                try:
+                    conf = float(data["conf"][i])
+                except (TypeError, ValueError):
+                    conf = -1.0
+                if conf >= 30:
+                    words.append((t, data["left"][i], data["top"][i],
+                                  data["width"][i], data["height"][i]))
+
+            # (1) Ground each field's overlay box in where its text actually appears.
+            for label, txt in field_texts.items():
+                located = _locate(words, txt, w, h)
+                if located:
+                    field_boxes[label] = located
+
+            # (2) Locate the warning by its GOVERNMENT anchor, box + tight-crop it.
+            gov = [g for g in words if g[0].lower().startswith("government")]
             if gov:
-                ai = min(gov, key=lambda i: data["top"][i])
-                ay, ax = data["top"][ai], data["left"][ai]
-                # Warning box = the anchor word + the words below it in the same
-                # column (excludes other panels/columns), so it tracks the real
-                # warning region across layouts.
-                x0s, y0s, x1s, y1s = [], [], [], []
-                for i in range(n):
-                    if not data["text"][i].strip():
-                        continue
-                    try:
-                        conf = float(data["conf"][i])
-                    except (TypeError, ValueError):
-                        conf = -1.0
-                    top, left = data["top"][i], data["left"][i]
-                    if conf >= 30 and ay - 5 <= top <= ay + 0.45 * h and left >= ax - 0.05 * w:
-                        x0s.append(left); y0s.append(top)
-                        x1s.append(left + data["width"][i]); y1s.append(top + data["height"][i])
-                if x0s:
+                ay = min(g[2] for g in gov)
+                ax = min(g[1] for g in gov)
+                block = [g for g in words if ay - 5 <= g[2] <= ay + 0.45 * h and g[1] >= ax - 0.05 * w]
+                if block:
                     px, py = 0.012 * w, 0.012 * h
-                    x0 = max(0, min(x0s) - px); y0 = max(0, min(y0s) - py)
-                    x1 = min(w, max(x1s) + px); y1 = min(h, max(y1s) + py)
+                    x0 = max(0, min(g[1] for g in block) - px)
+                    y0 = max(0, min(g[2] for g in block) - py)
+                    x1 = min(w, max(g[1] + g[3] for g in block) + px)
+                    y1 = min(h, max(g[2] + g[4] for g in block) + py)
                     box = [round(y0 / h * 1000), round(x0 / w * 1000),
                            round(y1 / h * 1000), round(x1 / w * 1000)]
-                    # Crop TIGHTLY to the warning block (not the full width below the
-                    # anchor) and upscale it, so Tesseract reads big, clean text —
-                    # this is what lifts noisy back-panel clauses out of the
-                    # ambiguous band.
                     region = image.crop((round(x0), round(y0), round(x1), round(y1)))
                     if region.size[0] and max(region.size) < 1500:
                         z = 1500 / max(region.size)
@@ -151,7 +203,7 @@ class TesseractOCR(OCRClient):
             region = image.crop((0, int(h * 0.55), w, h))  # fallback: bottom of the label
 
         text: str = pytesseract.image_to_string(region, config="--psm 6")
-        return text.strip(), box
+        return text.strip(), box, field_boxes
 
     async def aclose(self) -> None:
         """No persistent resources to release."""
