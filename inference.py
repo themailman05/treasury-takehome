@@ -281,6 +281,83 @@ def _extract_json(content: Optional[str]) -> dict:
     return obj
 
 
+def _clamp01(v: object) -> float:
+    try:
+        return max(0.0, min(1.0, float(v)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _coerce_box(v: object) -> Optional[list[int]]:
+    if not isinstance(v, (list, tuple)) or len(v) != 4:
+        return None
+    out: list[int] = []
+    for x in v:
+        try:
+            out.append(int(round(float(x))))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+    return out
+
+
+def _sanitize_field(f: object) -> dict:
+    if isinstance(f, str):  # model returned a bare string instead of {text, ...}
+        return {"text": f, "confidence": 0.9}
+    if not isinstance(f, dict):
+        return {"text": "", "confidence": 0.0}
+    if "confidence" in f:
+        f["confidence"] = _clamp01(f["confidence"])
+    if "box" in f:
+        f["box"] = _coerce_box(f["box"])
+    return f
+
+
+def _sanitize_extraction(d: dict) -> dict:
+    """Coerce the model's near-miss values into the schema instead of rejecting.
+
+    Ollama's ``format`` grammar enforces JSON *types*, not value constraints, so a
+    model occasionally emits a confidence outside [0,1], a float box coordinate, a
+    bare-string field, or an off-enum image_quality — all valid JSON that fails
+    Pydantic. Clamping/coercing here keeps a readable label from being needlessly
+    downgraded to needs_review."""
+    if not isinstance(d, dict):
+        return d
+    for key in ("brand_name", "class_type", "abv", "net_contents"):
+        if key in d:
+            d[key] = _sanitize_field(d[key])
+    w = d.get("warning")
+    if isinstance(w, dict):
+        if "confidence" in w:
+            w["confidence"] = _clamp01(w["confidence"])
+        if "box" in w:
+            w["box"] = _coerce_box(w["box"])
+        if "bbox" in w:
+            w["bbox"] = _coerce_box(w["bbox"])
+    elif w is not None and not isinstance(w, dict):
+        d["warning"] = {}  # a non-object warning is meaningless; use defaults
+    iq = d.get("image_quality")
+    d["image_quality"] = iq.lower() if isinstance(iq, str) and iq.lower() in (
+        "ok", "poor", "unreadable") else "ok"
+    return d
+
+
+def _parse_and_validate(content: Optional[str]) -> ModelExtraction:
+    """Parse the model's JSON, sanitize near-misses, and validate. On a genuine
+    schema failure, surface the offending field in the error (so logs are
+    diagnosable). The warning's ocr_text is dropped (it comes from OCR)."""
+    parsed = _sanitize_extraction(_extract_json(content))
+    try:
+        extraction = ModelExtraction.model_validate(parsed)
+    except ValidationError as exc:
+        first = (exc.errors() or [{}])[0]
+        raise InferenceError(
+            "model output did not match the extraction schema "
+            f"(loc={first.get('loc')} type={first.get('type')})"
+        ) from exc
+    extraction.warning.ocr_text = None  # authoritative reading comes from OCR
+    return extraction
+
+
 class _OpenAICompatClient(InferenceClient):
     """Shared OpenAI-compatible chat-completions client for the self-hosted
     backends (vLLM on GPU, Ollama on CPU).
@@ -357,15 +434,7 @@ class _OpenAICompatClient(InferenceClient):
                 "inference backend returned an unexpected response shape"
             ) from exc
 
-        parsed = _extract_json(content)
-        try:
-            extraction = ModelExtraction.model_validate(parsed)
-        except ValidationError as exc:
-            raise InferenceError(
-                "model output did not match the extraction schema"
-            ) from exc
-        extraction.warning.ocr_text = None
-        return extraction
+        return _parse_and_validate(content)
 
     async def aclose(self) -> None:
         """Close the underlying HTTP connection pool."""
@@ -449,15 +518,7 @@ class OllamaInferenceClient(InferenceClient):
                 "inference backend returned an unexpected response shape"
             ) from exc
 
-        parsed = _extract_json(content)
-        try:
-            extraction = ModelExtraction.model_validate(parsed)
-        except ValidationError as exc:
-            raise InferenceError(
-                "model output did not match the extraction schema"
-            ) from exc
-        extraction.warning.ocr_text = None  # authoritative reading comes from OCR
-        return extraction
+        return _parse_and_validate(content)
 
     async def aclose(self) -> None:
         await self._client.aclose()
