@@ -384,7 +384,49 @@ curl -s https://treasury.liam.cool/health
 # UI: https://treasury.liam.cool   — upload one label, or drop a batch.
 ```
 
-Redeploy after a code change: `scp` the changed files to `~/treasury` and `sudo systemctl restart treasury`.
+### Continuous deployment (GitHub Actions)
+
+Every push to `main` ships to the server automatically — `.github/workflows/deploy.yml`. The
+design goal was a deploy that is **safe** (never leaves the service down) and **least-privilege**
+(a leaked CI key can't be used as a shell).
+
+**How it works.** The runner streams exactly the committed tree to the server and a server-side
+receiver does the rest:
+
+```
+git archive HEAD  ──tar over SSH──▶  ~/deploy-receive.sh  (forced command)
+                                       ├─ validate payload (refuse empty/corrupt)
+                                       ├─ snapshot current release  (rollback point)
+                                       ├─ sync files, pip install -r requirements.txt
+                                       ├─ sudo systemctl restart treasury
+                                       └─ health-gate /health  ──unhealthy──▶ roll back + fail
+```
+
+Because the server has **no `git` and no `rsync`**, the runner ships a `git archive` tarball
+(`scripts/deploy.sh`); the receiver (`scripts/deploy-receive.sh`) extracts it over `~/treasury`,
+leaving the untracked `.venv`/`.env` intact. A post-deploy HTTPS check (`scripts/deploy.yml`'s
+*Verify public endpoint* step) confirms the box is serving from outside.
+
+**Security model.**
+- A **dedicated** ed25519 deploy key (separate from the GitHub push key — its own blast radius).
+- That key is pinned in `~/.ssh/authorized_keys` to a **forced command** (`command="…",no-pty,
+  no-*-forwarding`), so it can *only* run the deploy receiver — no interactive shell, no port
+  forwarding, no arbitrary commands.
+- The server's host keys are **pinned** in `scripts/known_hosts` (`StrictHostKeyChecking=yes`) —
+  no blind `accept-new`/MITM window.
+- The receiver self-updates: each successful deploy reinstalls the newest committed receiver as
+  the forced command, so repo and server never drift.
+
+**One-time setup.** Add a single GitHub Actions secret, `DEPLOY_SSH_KEY`, holding the private half
+of the deploy key:
+
+```bash
+gh secret set DEPLOY_SSH_KEY < deploy_ed25519        # or paste in the repo's Settings ▸ Secrets
+```
+
+The public half is installed on the server (forced command) and host keys are already committed,
+so no other secrets are needed. To deploy a change: merge to `main` (or run the workflow manually
+from the **Actions** tab). Manual fallback is still `scp … ~/treasury && sudo systemctl restart treasury`.
 
 ## 12. Design trade-offs & deployment notes
 

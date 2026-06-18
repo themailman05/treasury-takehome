@@ -1,0 +1,64 @@
+name: Deploy
+
+# Ship every push to main to the self-hosted GPU server (and allow a manual
+# "Run workflow" from the Actions tab). The deploy itself is hardened on the
+# server side: the key below can ONLY run the deploy receiver (forced command),
+# which validates the payload, backs up, restarts and rolls back on an unhealthy
+# result. See scripts/deploy-receive.sh and README §"Continuous deployment".
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time. Queue rather than cancel, so a deploy is never killed
+# mid-restart (which could leave the service down).
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Tighten the default token: this job only reads the repo to build the
+    # archive; it needs no write scopes.
+    permissions:
+      contents: read
+    env:
+      DEPLOY_HOST: treasury.liam.cool
+      DEPLOY_USER: ltsar
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH (deploy key + pinned host key)
+        # Pass the secret via env (not inline ${{ }}) so it is never baked into
+        # the rendered run-script text; printf '%s' keeps the key out of arg
+        # parsing. GitHub masks the value in logs either way.
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          install -m 600 /dev/null ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          # Fail early with a clear message if the secret is missing/empty.
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null 2>&1; then
+            echo "::error::DEPLOY_SSH_KEY secret is missing or not a valid private key."
+            exit 1
+          fi
+          cp "$GITHUB_WORKSPACE/scripts/known_hosts" ~/.ssh/known_hosts
+
+      - name: Deploy
+        env:
+          SSH_KEY: /home/runner/.ssh/deploy_key
+          KNOWN_HOSTS: /home/runner/.ssh/known_hosts
+        run: bash scripts/deploy.sh
+
+      - name: Verify public endpoint
+        # Independent confirmation from outside the box that HTTPS is serving a
+        # healthy app (the receiver already gated localhost health + rollback).
+        run: |
+          curl -fsS --retry 5 --retry-delay 3 --max-time 20 \
+            https://treasury.liam.cool/health | grep -q '"status": *"ok"'
+
+      - name: Clean up key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

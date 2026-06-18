@@ -24,10 +24,13 @@ env/
 test_images/samples_hybrid/images/
 test_images/samples_hybrid/backgrounds/
 
-# SSH / private keys (never commit) — liam_rsa is a deploy key kept in this dir
+# SSH / private keys (never commit) — liam_rsa is a deploy key kept in this dir.
+# scripts/known_hosts (public host keys) IS committed — it pins the server for CI.
 liam_rsa
 id_rsa
 *_rsa
+*_ed25519
+deploy_key*
 *.pem
 *.key
 
