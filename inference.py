@@ -50,22 +50,35 @@ _MAX_IMAGE_DIM = 1024
 _MAX_OUTPUT_TOKENS = 1536
 
 
-def _downscale_for_vlm(image_bytes: bytes, max_dim: int = _MAX_IMAGE_DIM) -> bytes:
-    """Shrink an oversized label for a faster vision prefill. Best-effort: on any
-    failure (non-image bytes, Pillow missing) return the original unchanged."""
+def _encode_for_vlm(image_bytes: bytes, max_dim: int = _MAX_IMAGE_DIM) -> bytes:
+    """Re-encode a label to a PNG the vision backend can always decode, shrinking
+    an oversized one on the way. Two jobs in one decode pass:
+
+      * Downscale to ``max_dim`` on the longest side — vision prefill cost scales
+        with the image tile count, so a full-res ~2 MP label is needlessly slow;
+        field text stays legible at this size (the warning's authoritative read
+        is full-res OCR, not the VLM).
+      * Normalize the container format. Ollama/llama.cpp decode images with
+        stb_image, which does NOT read every format Pillow can open (WebP, HEIC,
+        TIFF, animated GIF, ...). Passing those through verbatim makes the
+        backend reject the request — "mtmd ... failed to decode image bytes" ->
+        HTTP 400 -> the label degrades to needs_review with image_quality
+        "unreadable". Always emitting PNG guarantees a decodable payload (and
+        makes the OpenAI-compat path's hard-coded ``data:image/png`` truthful).
+
+    Best-effort: if Pillow is missing or the bytes are not a decodable image at
+    all, return them unchanged — a genuinely broken upload still degrades to
+    needs_review rather than crashing the request."""
     try:
         from PIL import Image
 
         im = Image.open(BytesIO(image_bytes))
         longest = max(im.size)
-        if longest <= max_dim:
-            return image_bytes
-        scale = max_dim / longest
-        im = im.convert("RGB").resize(
-            (round(im.size[0] * scale), round(im.size[1] * scale))
-        )
+        if longest > max_dim:
+            scale = max_dim / longest
+            im = im.resize((round(im.size[0] * scale), round(im.size[1] * scale)))
         out = BytesIO()
-        im.save(out, format="PNG")
+        im.convert("RGB").save(out, format="PNG")
         return out.getvalue()
     except Exception:
         return image_bytes
@@ -389,7 +402,7 @@ class _OpenAICompatClient(InferenceClient):
         *,
         application: Optional[ApplicationData] = None,
     ) -> ModelExtraction:
-        vlm_bytes = _downscale_for_vlm(image_bytes)
+        vlm_bytes = _encode_for_vlm(image_bytes)
         data_uri = "data:image/png;base64," + base64.b64encode(vlm_bytes).decode(
             "ascii"
         )
@@ -483,7 +496,7 @@ class OllamaInferenceClient(InferenceClient):
         *,
         application: Optional[ApplicationData] = None,
     ) -> ModelExtraction:
-        img_b64 = base64.b64encode(_downscale_for_vlm(image_bytes)).decode("ascii")
+        img_b64 = base64.b64encode(_encode_for_vlm(image_bytes)).decode("ascii")
         payload = {
             "model": self._settings.gemma_model,
             "messages": [
